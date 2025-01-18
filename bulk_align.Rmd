@@ -1,0 +1,108 @@
+---
+title: "bulk seq align"
+output: html_notebook
+---
+
+
+```{r}
+rm(list=ls())
+library("GenomicFeatures")
+library("tximport")
+library("DESeq2")
+```
+```{r}
+tx2gene <- read.csv("anno/tx2gene.GRCm39.csv")
+tx2gene <- tx2gene[,-1]
+colnames(tx2gene) <- c("TXNAME", "GeneSymbol")
+```
+
+```{r}
+samplesInfo <- read.csv("all_meta.csv")
+```
+
+
+```{r}
+samplesInfo.lof <- subset(samplesInfo, cohort=="lof")
+rownames(samplesInfo.lof) <- samplesInfo.lof$sample
+samplesInfo.lof$Tx <- factor(samplesInfo.lof$Tx, levels = c("YFP", "Cre"))
+samplesInfo.lof$Tx2 <- factor(samplesInfo.lof$Tx2, levels = c("chow", "HFD"))
+samplesInfo.lof$EarTag <- factor(samplesInfo.lof$EarTag)
+
+files <- samplesInfo.lof$file
+names(files) <- samplesInfo.lof$sample
+
+txi.lof <- tximport(files, type="salmon", tx2gene=tx2gene, dropInfReps=T, ignoreTxVersion=T, ignoreAfterBar = T)
+sampleData.lof <- DataFrame(sample = samplesInfo.lof$sample,
+                        individual=factor(samplesInfo.lof$EarTag),
+                        tx = factor(samplesInfo.lof$Tx, levels = c("YFP", "Cre")),
+                        diet = factor(samplesInfo.lof$Tx2, levels = c("chow", "HFD")),
+                        ani.diet= factor(samplesInfo.lof$ani.diet))
+ddsTxi.lof <- DESeqDataSetFromTximport(txi.lof,
+                                   colData = sampleData.lof,
+                                   design = ~ diet)
+design.lof <- model.matrix(~ diet + diet:ani.diet + diet:tx, sampleData.lof)
+dds.lof <- DESeq(ddsTxi.lof, full=design.lof)
+
+res.lof.chow <- results(dds.lof, name="dietchow.txCre")
+res.lof.HFD <- results(dds.lof, name="dietHFD.txCre")
+```
+
+```{r}
+samplesInfo.gof <- subset(samplesInfo, cohort=="gof")
+rownames(samplesInfo.gof) <- samplesInfo.gof$sample
+samplesInfo.gof$Tx <- factor(samplesInfo.gof$Tx, levels = c("YFP", "Cre"))
+samplesInfo.gof$Tx2 <- factor(samplesInfo.gof$Tx2, levels = c("chow", "HFD"))
+samplesInfo.gof$EarTag <- factor(samplesInfo.gof$EarTag)
+
+files <- samplesInfo.gof$file
+names(files) <- samplesInfo.gof$sample
+
+txi.gof <- tximport(files, type="salmon", tx2gene=tx2gene, dropInfReps=T, ignoreTxVersion=T, ignoreAfterBar = T)
+sampleData.gof <- DataFrame(sample = samplesInfo.gof$sample,
+                        individual=factor(samplesInfo.gof$EarTag),
+                        tx = factor(samplesInfo.gof$Tx, levels = c("YFP", "Cre")),
+                        diet = factor(samplesInfo.gof$Tx2, levels = c("chow", "HFD")),
+                        ani.diet= factor(samplesInfo.gof$ani.diet))
+ddsTxi.gof <- DESeqDataSetFromTximport(txi.gof,
+                                   colData = sampleData.gof,
+                                   design = ~ diet)
+design.gof <- model.matrix(~ diet + diet:ani.diet + diet:tx, sampleData.gof)
+design.gof <- design.gof[, -11]
+dds.gof <- DESeq(ddsTxi.gof, full=design.gof)
+
+res.gof.chow <- results(dds.gof, name="dietchow.txCre")
+res.gof.HFD <- results(dds.gof, name="dietHFD.txCre")
+```
+
+```{r}
+samplesInfo.abl <- subset(samplesInfo, cohort=="abl")
+rownames(samplesInfo.abl) <- samplesInfo.abl$sample
+samplesInfo.abl$Tx <- factor(samplesInfo.abl$Tx, levels = c("YFP", "Cre"))
+samplesInfo.abl$Tx2 <- factor(samplesInfo.abl$Tx2, levels = c("RT", "Cold"))
+samplesInfo.abl$EarTag <- factor(samplesInfo.abl$EarTag)
+
+files <- samplesInfo.abl$file
+names(files) <- samplesInfo.abl$sample
+
+txi.abl <- tximport(files, type="salmon", tx2gene=tx2gene, dropInfReps=T, ignoreTxVersion=T, ignoreAfterBar = T)
+sampleData.abl <- DataFrame(sample = samplesInfo.abl$sample,
+                        individual=factor(samplesInfo.abl$EarTag),
+                        tx = factor(samplesInfo.abl$Tx, levels = c("YFP", "Cre")),
+                        diet = factor(samplesInfo.abl$Tx2, levels = c("RT", "Cold")),
+                        ani.diet= factor(samplesInfo.abl$ani.diet))
+ddsTxi.abl <- DESeqDataSetFromTximport(txi.abl,
+                                   colData = sampleData.abl,
+                                   design = ~ diet)
+design.abl <- model.matrix(~ diet + diet:ani.diet + diet:tx, sampleData.abl)
+design.abl <- design.abl[,-10]
+dds.abl <- DESeq(ddsTxi.abl, full=design.abl)
+
+res.abl.RT <- results(dds.abl, name="dietRT.txCre")
+res.abl.Cold <- results(dds.abl, name="dietCold.txCre")
+```
+
+```{r}
+saveRDS(dds.lof, "deseq_rds_1023/dds.lof.rds")
+saveRDS(dds.gof, "deseq_rds_1023/dds.gof.rds")
+saveRDS(dds.abl, "deseq_rds_1023/dds.abl.rds")
+```
