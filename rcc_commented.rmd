@@ -1,0 +1,164 @@
+---
+title: "fat-DRG annotation"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r}
+rm(list=ls())
+library(dplyr)
+library(Seurat)
+library(SeuratDisk)
+library(reshape2)
+library(tidyr)
+
+# Standard preprocessing pipeline: normalize, find variable features, scale, and run PCA
+preprocess = function(data) {
+  data = NormalizeData(data)
+  data = FindVariableFeatures(data, selection.method = 'vst', nfeatures = 2000)
+  data = ScaleData(data, features = rownames(data))  # Scale all genes
+  data = RunPCA(data, features = VariableFeatures(data), verbose = F)
+  return (data)
+}
+
+# Read 10x data from directory format (matrix, features, barcodes)
+read.10xdata = function(data.file, project.name, gene.column=2) {
+  count = Read10X(data.file, gene.column=gene.column)
+  seurat.obj = CreateSeuratObject(count, min.cell=3, project=project.name, min.features=200)
+  seurat.obj$orig.ident = rep(project.name, length(seurat.obj$orig.ident))
+  return (seurat.obj)
+}
+
+# Transfer cell type labels from reference dataset to query dataset using anchor-based integration
+transfer.label = function(reference, query) {
+  drg.anchors = FindTransferAnchors(reference = reference,
+                                    query = query,
+                                    dims=1:50)
+  labels = TransferData(anchorset = drg.anchors ,
+                        refdata = reference@active.ident,  # Use active identity from reference
+                        dims = 1:50)
+  query = AddMetaData(query, metadata = labels)
+  return (query)
+}
+```
+
+```{r}
+iwat = read.10xdata('Adipose_Seq/iwat', 'iwat')
+ewat = read.10xdata('Adipose_Seq/ewat', 'ewat')
+non = read.10xdata('Adipose_Seq/unlabeled', 'unlabeled')
+fat.seq = merge(non, c(iwat, ewat))
+```
+
+```{r}
+ginty.save = LoadH5Seurat('ginty.h5Seurat')   # Load reference DRG dataset
+```
+
+```{r}
+# Calculate mitochondrial content and filter cells
+fat.seq[['mt.percent']] = PercentageFeatureSet(fat.seq, pattern='^mt-')
+fat.seq = subset(fat.seq, subset = mt.percent < 10)  # Remove cells with high mitochondrial content
+fat.seq = preprocess(fat.seq)
+```
+
+```{r}
+# Subset for neurons and perform clustering
+fat.seq = subset(fat.seq, subset=Rbfox3 > 1)  # Keep only cells with neuronal marker
+fat.seq = fat.seq %>% RunUMAP(dims=1:50, verbose=F) %>%
+  FindNeighbors(dims=1:50) %>%
+  FindClusters(res=0.5)
+```
+
+```{r}
+# Manual annotation of DRG neuron subtypes based on known marker expression
+cell.type.df = data.frame(cluster=c(0:25),
+                          celltype=c('CGRP-alpha', #0
+                                     'Th',         #1
+                                     'Sst',        #2
+                                     'MrgD',       #3
+                                     'MrgD',       #4
+                                     'Th',         #5
+                                     'CGRP-epsilon', #6
+                                     'CGRP-theta', #7
+                                     'CGRP-alpha', #8
+                                     'MrgD',       #9
+                                     'CGRP-eta',   #10
+                                     'MrgD',       #11
+                                     'CGRP-eta',   #12
+                                     'Cold',       #13
+                                     'CGRP-gamma', #14
+                                     'CGRP-epsilon',  #15
+                                     'PV',         #16
+                                     'Abeta-RA',   #17
+                                     'CGRP-theta', #18
+                                     'Adelta-LTMR',#19
+                                     'CGRP-zeta',  #20
+                                     'MrgD',       #21
+                                     'MrgD',       #22
+                                     'CGRP-gamma', #23
+                                     'Abeta-field',#24
+                                     'Other'    #25
+                                     ))
+# Assign cell types to reference dataset
+ginty.save$subtype = cell.type.df$celltype[match(ginty.save$seurat_clusters,
+                                                cell.type.df$cluster)]
+ginty.save = subset(ginty.save, subset = subtype != 'Other')  # Remove non-neuron cells
+```
+
+```{r}
+# Transfer cell type annotations from reference to query dataset
+Idents(ginty.save) = 'subtype'
+fat.seq = transfer.label(ginty.save, fat.seq)
+```
+
+```{r}
+# Keep only high-confidence predictions
+fat.pop = subset(fat.seq, subset=prediction.score.max > 0.9)
+```
+
+```{r}
+# Calculate frequency and percentage distribution of categorical values
+get.percentage = function(values) {
+  summary_table <- table(values)
+  percentage <- prop.table(summary_table) * 100
+  result <- data.frame(
+    Value = names(summary_table),
+    Count = as.vector(summary_table),
+    Percentage = round(as.vector(percentage), 2)
+  )
+  return (result)
+}
+```
+
+```{r}
+# Calculate cell type composition for each adipose tissue sample
+fat.perc = fat.pop@meta.data %>%
+  group_by(orig.ident, predicted.id) %>%
+  summarise(Count=n(), .groups='drop') %>%
+  group_by(orig.ident) %>%
+  mutate(Percentage=round(Count / sum(Count) * 100, 2)) %>%
+  ungroup() %>%
+  pivot_wider(
+    names_from = orig.ident,
+    values_from= c(Count, Percentage),
+    names_glue = "{.value}.{orig.ident}"
+  ) %>%
+  rename(subtype=predicted.id)
+fat.perc[is.na(fat.perc)] = 0  # Replace NA values with 0
+```
+
+```{r}
+# Calculate cell type composition for reference DRG dataset
+ginty.perc = ginty.save@meta.data %>%
+  group_by(orig.ident, subtype) %>%
+  summarise(Count=n(), .groups='drop') %>%
+  group_by(orig.ident) %>%
+  mutate(Percentage=round(Count / sum(Count) * 100, 2)) %>%
+  ungroup() %>%
+  select(-c(orig.ident)) %>%
+  rename_with(~ paste0(.x, '.AllDRG'), -subtype)
+# Combine adipose and reference compositions for comparison
+all.perc = full_join(ginty.perc, fat.perc, by='subtype')
+all.perc[is.na(all.perc)] = 0
+write.csv(all.perc, file = 'population_sum.csv', row.names = F)
+```

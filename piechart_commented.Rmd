@@ -1,0 +1,362 @@
+---
+title: "piechart"
+output: html_document
+---
+
+```{r}
+rm(list=ls())
+library(dplyr)
+library(Seurat)
+library(reshape2)
+library(ggplot2)
+library(SeuratDisk)
+library(cowplot)
+
+# Standard preprocessing pipeline: normalize, find variable features, scale, and run PCA
+preprocess = function(data) {
+  data = NormalizeData(data)
+  data = FindVariableFeatures(data, selection.method = 'vst', nfeatures = 2000)
+  data = ScaleData(data, features = rownames(data))  # Scale all genes
+  data = RunPCA(data, features = VariableFeatures(data), verbose = F)
+  return (data)
+}
+
+# Read 10x data from directory format (matrix, features, barcodes)
+read.10xdata = function(data.file, project.name, gene.column=2) {
+  count = Read10X(data.file, gene.column=gene.column)
+  seurat.obj = CreateSeuratObject(count, min.cell=3, project=project.name, min.features=200)
+  seurat.obj$orig.ident = rep(project.name, length(seurat.obj$orig.ident))
+  return (seurat.obj)
+}
+```
+
+```{r}
+iwat = read.10xdata('Adipose_Seq/iwat', 'iwat')
+ewat = read.10xdata('Adipose_Seq/ewat', 'ewat')
+non = read.10xdata('Adipose_Seq/unlabeled', 'unlabeled')
+fat.seq = merge(non, c(iwat, ewat))
+```
+
+```{r}
+set.seed(222)
+fat.seq$sample_type <- fat.seq$orig.ident
+# Calculate mitochondrial content and filter cells
+fat.seq[['mt.percent']] = PercentageFeatureSet(fat.seq, pattern='^mt-')
+fat.seq = subset(fat.seq, subset = mt.percent < 10)  # Remove cells with high mitochondrial content
+# Subset for neurons and perform clustering
+fat.neuron = subset(fat.seq, subset = Rbfox3 > 0)  # Keep only cells with neuronal marker
+fat.neuron = preprocess(fat.neuron) %>%
+  RunUMAP(dims = 1:50, verbose = F) %>% 
+  FindNeighbors(dims=1:20, verbose = F) %>%
+  FindClusters(resolution = 0.8, verbose = F)
+```
+
+```{r}
+FeaturePlot(fat.neuron, c('Sox2', 'Ednrb'), order = T)
+```
+
+
+
+```{r}
+fat.neuron = subset(fat.neuron, subset = seurat_clusters != 7)  # Remove non-neuronal cluster
+fat.neuron = preprocess(fat.neuron) %>%
+  RunUMAP(dims = 1:50, verbose = F) %>% 
+  FindNeighbors(dims=1:20, verbose = F) %>%
+  FindClusters(resolution = 0.8, verbose = F)
+```
+```{r}
+table(fat.neuron$orig.ident)
+```
+
+```{r}
+DimPlot(fat.neuron, group.by = "orig.ident", cols = c("lightgray", "#009999", "#960621"), order = c("iwat", "ewat", "unlabeled"), pt.size = 1) +theme(legend.position = "none")
+
+```
+```{r}
+FeaturePlot(fat.neuron, c('Piezo2', 'Mrgprd'), order = T, split.by = 'orig.ident')
+```
+
+```{r}
+library(ggvenn)
+# Create Venn diagram showing overlap of gene expression across different features
+plot_venn = function(data, color=c("#0083F2", "#EFCA00", "#B7B7B7", "#EA836C")) {
+  x = list()
+  for (col in colnames(data)) {
+    x[[col]] = rownames(data)[data[[col]] > 0]  # Get cells expressing each gene
+  }
+  ggvenn(x,
+         fill_color = color,
+         stroke_size = 0.5, set_name_size = 4
+        )
+}
+
+
+plot_venn(FetchData(subset(fat.neuron, subset = orig.ident == "iwat"), vars = c('orig.ident', 'Piezo2', 'Trpv1', 'Trpa1', 'Th', 'Calca'))[, c(2:4)])
+```
+
+```{r}
+library(scatterpie)
+
+# Custom dot plot visualization using pie charts to show expression percentage per group
+PiePlot <- function(
+  object,
+  assay = NULL,
+  features,
+  cols = c("lightgrey", "blue"),
+  col.min = -2.5,
+  col.max = 2.5,
+  dot.min = 0,
+  dot.scale = 6,
+  idents = NULL,
+  group.by = NULL,
+  split.by = NULL,
+  cluster.idents = FALSE,
+  scale = TRUE,
+  scale.by = 'radius',
+  scale.min = NA,
+  scale.max = NA,
+  pct.threshold = 0
+) {
+  assay <- assay %||% DefaultAssay(object = object)
+  DefaultAssay(object = object) <- assay
+  split.colors <- !is.null(x = split.by) && !any(cols %in% rownames(x = brewer.pal.info))
+  scale.func <- switch(
+    EXPR = scale.by,
+    'size' = scale_size,
+    'radius' = scale_radius,
+    stop("'scale.by' must be either 'size' or 'radius'")
+  )
+  feature.groups <- NULL
+  if (is.list(features) | any(!is.na(names(features)))) {
+    feature.groups <- unlist(x = sapply(
+      X = 1:length(features),
+      FUN = function(x) {
+        return(rep(x = names(x = features)[x], each = length(features[[x]])))
+      }
+    ))
+    if (any(is.na(x = feature.groups))) {
+      warning(
+        "Some feature groups are unnamed.",
+        call. = FALSE,
+        immediate. = TRUE
+      )
+    }
+    features <- unlist(x = features)
+    names(x = feature.groups) <- features
+  }
+  cells <- unlist(x = CellsByIdentities(object = object, idents = idents))
+  data.features <- FetchData(object = object, vars = features, cells = cells)
+  data.features$id <- if (is.null(x = group.by)) {
+    Idents(object = object)[cells, drop = TRUE]
+  } else {
+    object[[group.by, drop = TRUE]][cells, drop = TRUE]
+  }
+  if (!is.factor(x = data.features$id)) {
+    data.features$id <- factor(x = data.features$id)
+  }
+  id.levels <- levels(x = data.features$id)
+  gid.levels = id.levels
+  data.features$id <- as.vector(x = data.features$id)
+  if (!is.null(x = split.by)) {
+    splits <- object[[split.by, drop = TRUE]][cells, drop = TRUE]
+    if (split.colors) {
+      if (length(x = unique(x = splits)) > length(x = cols)) {
+        stop("Not enough colors for the number of groups")
+      }
+      cols <- cols[1:length(x = unique(x = splits))]
+      names(x = cols) <- unique(x = splits)
+    }
+    data.features$id <- paste(data.features$id, splits, sep = '_')
+    unique.splits <- unique(x = splits)
+    id.levels <- paste0(rep(x = id.levels, each = length(x = unique.splits)), "_", rep(x = unique(x = splits), times = length(x = id.levels)))
+  }
+  data.plot <- lapply(
+    X = id.levels,
+    FUN = function(ident) {
+      data.use <- data.features[data.features$id == ident, 1:(ncol(x = data.features) - 1), drop = FALSE]
+      avg.exp <- apply(
+        X = data.use,
+        MARGIN = 2,
+        FUN = function(x) {
+          return(mean(x = x[x > 0]))  # Calculate mean expression in expressing cells only
+        }
+      )
+      pct.exp <- apply(X = data.use, MARGIN = 2, FUN = PercentAbove, threshold = pct.threshold)
+      return(list(avg.exp = avg.exp, pct.exp = pct.exp))
+    }
+  )
+  names(x = data.plot) <- id.levels
+  
+  if (cluster.idents) {
+    mat <- do.call(
+      what = rbind,
+      args = lapply(X = data.plot, FUN = unlist)
+    )
+    mat <- scale(x = mat)
+    id.levels <- id.levels[hclust(d = dist(x = mat))$order]
+  }
+  data.plot <- lapply(
+    X = names(x = data.plot),
+    FUN = function(x) {
+      data.use <- as.data.frame(x = data.plot[[x]])
+      data.use$features.plot <- rownames(x = data.use)
+      data.use$id <- x
+      return(data.use)
+    }
+  )
+  data.plot <- do.call(what = 'rbind', args = data.plot)
+  if (!is.null(x = id.levels)) {
+    data.plot$id <- factor(x = data.plot$id, levels = id.levels)
+  }
+  ngroup <- length(x = levels(x = data.plot$id))
+  if (ngroup == 1) {
+    scale <- FALSE
+    warning(
+      "Only one identity present, the expression values will be not scaled",
+      call. = FALSE,
+      immediate. = TRUE
+    )
+  }
+  avg.exp.scaled <- sapply(
+    X = unique(x = data.plot$features.plot),
+    FUN = function(x) {
+      data.use <- data.plot[data.plot$features.plot == x, 'avg.exp']
+      if (scale) {
+        data.use <- scale(x = data.use)
+        data.use <- MinMax(data = data.use, min = col.min, max = col.max)
+      } else {
+        data.use <- log1p(x = data.use)
+      }
+      return(data.use)
+    }
+  )
+  avg.exp.scaled <- as.vector(x = t(x = avg.exp.scaled))
+  if (split.colors) {
+    avg.exp.scaled <- as.numeric(x = cut(x = avg.exp.scaled, breaks = 20))
+  }
+  data.plot$avg.exp.scaled <- avg.exp.scaled
+  data.plot$features.plot <- factor(
+    x = data.plot$features.plot,
+    levels = features
+  )
+  #data.plot$pct.exp[data.plot$pct.exp < dot.min] <- NA
+  data.plot$pct.exp <- data.plot$pct.exp * 100
+  if (split.colors) {
+    splits.use <- vapply(
+      X = as.character(x = data.plot$id),
+      FUN = gsub,
+      FUN.VALUE = character(length = 1L),
+      pattern =  paste0(
+        '^((',
+        paste(sort(x = levels(x = object), decreasing = TRUE), collapse = '|'),
+        ')_)'
+      ),
+      replacement = '',
+      USE.NAMES = FALSE
+    )
+    data.plot$colors <- mapply(
+      FUN = function(color, value) {
+        return(colorRampPalette(colors = c('white', color))(20)[value])
+      },
+      color = cols[splits.use],
+      value = avg.exp.scaled
+    )
+  }
+  color.by <- ifelse(test = split.colors, yes = 'colors', no = 'avg.exp.scaled')
+  if (!is.na(x = scale.min)) {
+    data.plot[data.plot$pct.exp < scale.min, 'pct.exp'] <- scale.min
+  }
+  if (!is.na(x = scale.max)) {
+    data.plot[data.plot$pct.exp > scale.max, 'pct.exp'] <- scale.max
+  }
+  if (!is.null(x = feature.groups)) {
+    data.plot$feature.groups <- factor(
+      x = feature.groups[data.plot$features.plot],
+      levels = unique(x = feature.groups)
+    )
+  }
+  data.plot$negative = 100 - data.plot$pct.exp  # Calculate non-expressing cell percentage
+  data.plot$x = match(data.plot$features.plot, levels(factor(data.plot$features.plot)))
+  data.plot$y = match(data.plot$id, gid.levels)
+
+  plot <- ggplot(data = data.plot, mapping = aes_string(x = 'features.plot', y = 'id')) +
+      geom_scatterpie(aes(x=x, y=y), data=data.plot,
+      cols=c('pct.exp', 'negative'), color=NA) +
+    theme(axis.title.x = element_blank(), axis.title.y = element_blank()) +
+    coord_equal() +
+    scale_x_continuous(name='', breaks=c(1:max(data.plot$x)),
+                   labels=levels(factor(data.plot$features.plot))) +
+    scale_y_continuous(name='', breaks=c(1:max(data.plot$y)),
+                   labels=levels(factor(data.plot$id))) +
+    theme_cowplot() + theme(axis.text.x = element_text(angle = 90))
+
+  if (!is.null(x = feature.groups)) {
+    plot <- plot + facet_grid(
+      facets = ~feature.groups,
+      scales = "free_x",
+      space = "free_x",
+      switch = "y"
+    ) + theme(
+      panel.spacing = unit(x = 1, units = "lines"),
+      strip.background = element_blank()
+    )
+  }
+
+  if (split.colors) {
+    plot <- plot + scale_color_identity()
+  } else if (length(x = cols) == 1) {
+    plot <- plot + scale_color_distiller(palette = cols)
+  } else {
+    plot <- plot + scale_fill_manual(values=cols) +
+      scale_color_manual(values=cols)
+  }
+  return(plot)
+  #return(data.plot)
+}
+```
+
+```{r}
+# List of receptor and channel genes to visualize
+gene.list <- c('Adra2a',
+'Asic1',
+'Asic3',
+'Chrna3',
+'Gabra3',
+'Gfra1',
+'Gfra2',
+'Grik1',
+'Il31ra',
+'Lepr',
+'Lpar3',
+'Mrgpra3',
+'Mrgprd',
+'Npy2r',
+'Ntrk2',
+'Ntrk3',
+'P2rx3',
+'P2ry1',
+'Piezo2',
+'Slc17a7',
+'Slc17a8',
+'Trpa1',
+'Trpc3',
+'Trpm8',
+'Trpv1',
+'Trpv4')
+```
+
+
+```{r}
+# Compare IWAT neurons to unlabeled DRG neurons
+plot.neuron = subset(fat.neuron, subset = orig.ident %in% c('iwat', 'unlabeled'))
+plot.neuron$orig.ident = factor(plot.neuron$orig.ident, levels=c('unlabeled', 'iwat'))
+PiePlot(plot.neuron, features = gene.list, cols= c("#960621", "lightgray"), group.by = "orig.ident")
+```
+
+```{r}
+# Compare EWAT neurons to unlabeled DRG neurons
+plot.neuron = subset(fat.neuron, subset = orig.ident %in% c('ewat', 'unlabeled'))
+plot.neuron$orig.ident = factor(plot.neuron$orig.ident, levels=c('unlabeled', 'ewat'))
+PiePlot(plot.neuron, features = gene.list, cols= c("#009999", "lightgray"), group.by = "orig.ident")
+```
+
